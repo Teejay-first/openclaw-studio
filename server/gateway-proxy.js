@@ -188,22 +188,51 @@ function createGatewayProxy(options) {
 
         upstreamWs = new WebSocket(upstreamUrl, { origin: upstreamOrigin });
 
-        upstreamWs.on("open", () => {
-          upstreamReady = true;
+        let connectFrameSent = false;
+        let challengeTimer = null;
+
+        const sendConnectFrame = () => {
+          if (connectFrameSent) return;
+          connectFrameSent = true;
+          if (challengeTimer !== null) {
+            clearTimeout(challengeTimer);
+            challengeTimer = null;
+          }
           if (browserHasAuth) {
             upstreamWs.send(JSON.stringify(parsed));
-            return;
+          } else {
+            const connectFrame = {
+              ...parsed,
+              params: injectAuthToken(parsed.params, upstreamToken),
+            };
+            upstreamWs.send(JSON.stringify(connectFrame));
           }
+        };
 
-          const connectFrame = {
-            ...parsed,
-            params: injectAuthToken(parsed.params, upstreamToken),
-          };
-          upstreamWs.send(JSON.stringify(connectFrame));
+        upstreamWs.on("open", () => {
+          upstreamReady = true;
+          // Wait for connect.challenge before sending the connect frame.
+          // Fallback: send after timeout if no challenge arrives.
+          challengeTimer = setTimeout(() => {
+            sendConnectFrame();
+          }, 750);
         });
 
         upstreamWs.on("message", (upRaw) => {
           const upParsed = safeJsonParse(String(upRaw ?? ""));
+
+          // Wait for the gateway challenge before sending the connect frame.
+          if (
+            !connectFrameSent &&
+            upParsed &&
+            isObject(upParsed) &&
+            upParsed.type === "event" &&
+            upParsed.event === "connect.challenge"
+          ) {
+            sendConnectFrame();
+            return;
+          }
+
           if (upParsed && isObject(upParsed) && upParsed.type === "res") {
             const resId = typeof upParsed.id === "string" ? upParsed.id : "";
             if (resId && connectRequestId && resId === connectRequestId) {
